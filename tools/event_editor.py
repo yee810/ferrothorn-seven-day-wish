@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from event_system import (  # noqa: E402
     ASSETS,
+    BGM_DIR,
     EVENTS_PATH,
     ICON_DIR,
     MAPS_PATH,
@@ -83,6 +84,10 @@ class EventEditor(tk.Tk):
         self.sizes = map_sizes()
         self.preloads = sorted(path.name for path in PRELOAD_DIR.glob("*.png"))
         self.icons = sorted(path.name for path in ICON_DIR.glob("*.png"))
+        self.music_tracks = sorted(
+            path.name for path in BGM_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in {".flac", ".ogg", ".mp3", ".wav", ".mid"}
+        ) if BGM_DIR.is_dir() else []
         self.map_specs = self._load_map_specs()
         self.map_cache: dict[str, Image.Image] = {}
         self.icon_cache: dict[str, Image.Image] = {}
@@ -253,7 +258,7 @@ class EventEditor(tk.Tk):
             form, textvariable=self.step_type,
             values=("dialogue", "battle", "toast", "set_flag", "wait", "camera_pan",
                     "camera_shake", "play_animation", "actor_move", "actor_visibility",
-                    "break_rock"),
+                    "break_rock", "play_music"),
             state="readonly", width=16,
         )
         type_box.grid(row=0, column=1, sticky="w")
@@ -275,8 +280,10 @@ class EventEditor(tk.Tk):
             values=("placeholder", "grotle_tutorial", "zubat", "aron", "sableye"),
         )
         self.battle_entry.grid(row=4, column=1, columnspan=3, sticky="ew", pady=(5, 0))
-        ttk.Label(form, text="标记/动画").grid(row=5, column=0, sticky="w", pady=(5, 0))
-        self.value_entry = ttk.Entry(form, textvariable=self.step_value)
+        ttk.Label(form, text="标记/动画/音乐").grid(row=5, column=0, sticky="w", pady=(5, 0))
+        self.value_entry = ttk.Combobox(
+            form, textvariable=self.step_value, values=self.music_tracks,
+        )
         self.value_entry.grid(row=5, column=1, columnspan=3, sticky="ew", pady=(5, 0))
         ttk.Label(form, text="目标 X/Y").grid(row=6, column=0, sticky="w", pady=(5, 0))
         position_row = ttk.Frame(form)
@@ -543,6 +550,8 @@ class EventEditor(tk.Tk):
                 label = f"{index}. {step_type} -> {step.get('position')} ({step.get('duration_ms')} ms)"
             elif step_type == "play_animation":
                 label = f"{index}. 动画 {step.get('animation')} @ {step.get('position')}"
+            elif step_type == "play_music":
+                label = f"{index}. 播放音乐 {step.get('track')}"
             else:
                 label = f"{index}. 角色可见性 {step.get('actor')}={step.get('visible')}"
             self.step_list.insert("end", label)
@@ -578,6 +587,8 @@ class EventEditor(tk.Tk):
             self.step_visible.set(step.get("value", True))
         elif step["type"] == "play_animation":
             self.step_value.set(step.get("animation", "meteor"))
+        elif step["type"] == "play_music":
+            self.step_value.set(step.get("track", ""))
         self._step_type_changed()
         self._restart_preview()
 
@@ -610,6 +621,12 @@ class EventEditor(tk.Tk):
                 "position": [self.step_x.get(), self.step_y.get()],
                 "duration_ms": self.step_duration.get(),
             }
+        if step_type == "play_music":
+            track = self.step_value.get().strip()
+            if not track:
+                messagebox.showwarning("缺少音乐", "请选择背景音乐文件。")
+                return None
+            return {"type": "play_music", "track": Path(track).name}
         if step_type == "actor_move":
             return {
                 "type": "actor_move", "actor": self.step_actor.get().strip() or "event",
@@ -703,7 +720,12 @@ class EventEditor(tk.Tk):
         self.speaker_entry.configure(state="normal" if dialogue else "disabled")
         self.text_editor.configure(state="normal" if text_enabled else "disabled")
         self.battle_entry.configure(state="readonly" if step_type == "battle" else "disabled")
-        self.value_entry.configure(state="normal" if step_type in {"set_flag", "play_animation"} else "disabled")
+        if step_type == "play_music":
+            self.value_entry.configure(state="readonly" if self.music_tracks else "normal")
+        else:
+            self.value_entry.configure(
+                state="normal" if step_type in {"set_flag", "play_animation"} else "disabled"
+            )
         position_state = "normal" if step_type in {
             "camera_pan", "play_animation", "actor_move", "break_rock"
         } else "disabled"
@@ -784,6 +806,7 @@ class EventEditor(tk.Tk):
                 "camera_pan": f"镜头平移到 {self.camera_target.get()}\n坐标 ({self.step_x.get()}, {self.step_y.get()})",
                 "camera_shake": f"镜头震动 {self.step_duration.get()} ms\n强度 {self.step_intensity.get()}",
                 "play_animation": f"播放 {self.step_value.get() or 'meteor'}\n坐标 ({self.step_x.get()}, {self.step_y.get()})",
+                "play_music": f"播放背景音乐\n{self.step_value.get()}",
                 "actor_move": f"移动 {self.step_actor.get()} 到\n({self.step_x.get()}, {self.step_y.get()})",
                 "actor_visibility": f"{self.step_actor.get()} 可见：{self.step_visible.get()}",
             }.get(self.step_type.get(), self.step_type.get())

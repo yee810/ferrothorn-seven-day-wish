@@ -28,9 +28,26 @@ AUDIO_ASSETS = ROOT / "assets" / "resource" / "audio"
 LOGICAL_SIZE = (480, 320)
 DEFAULT_WINDOW_SCALE = 2
 FPS = 60
+STC_UP_COMMAND = 0x01
+STC_DOWN_COMMAND = 0x02
+STC_LEFT_COMMAND = 0x03
+STC_RIGHT_COMMAND = 0x04
+STC_CONFIRM_COMMAND = 0x05
+STC_RESET_COMMAND = 0x06
 STC_VIBRATION_COMMAND = 0x09
 STC_LIGHT_MARKER = 0x40
 STC_TEMPERATURE_MARKER = 0x41
+STC_CONTROL_COMMANDS = frozenset(
+    (
+        STC_UP_COMMAND,
+        STC_DOWN_COMMAND,
+        STC_LEFT_COMMAND,
+        STC_RIGHT_COMMAND,
+        STC_CONFIRM_COMMAND,
+        STC_RESET_COMMAND,
+        STC_VIBRATION_COMMAND,
+    )
+)
 
 FOE_BOX_RECT = (6, 8, 192, 68)
 PLAYER_BOX_RECT = (280, 146, 200, 68)
@@ -49,10 +66,14 @@ class MoveSpec:
     category: str
     value_label: str
     damage: int = 0
+    damage_max: int | None = None
+    damage_scale: float = 1.0
     heal_percent: int = 0
     effect: str = "attack"
     info_lines: tuple[str, str] | None = None
     trigger: str = "confirm"
+    light_min: int | None = None
+    light_max: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +86,7 @@ class EncounterSpec:
     player_moves: tuple[MoveSpec, ...]
     foe_moves: tuple[MoveSpec, ...]
     opening_notes: tuple[str, ...] = ()
+    foe_moves_first: bool = False
 
 
 class STCSerialBridge:
@@ -95,18 +117,21 @@ class STCSerialBridge:
         while not self.stop.is_set() and self.link:
             data = self.link.read(64)
             for value in data:
-                if self.marker is None and value in (STC_LIGHT_MARKER, STC_TEMPERATURE_MARKER):
-                    self.marker, self.high = value, None
-                elif self.marker is not None:
-                    if self.high is None:
-                        self.high = value
-                    else:
-                        raw = (self.high << 8) | value
-                        kind = "light" if self.marker == STC_LIGHT_MARKER else "temperature"
-                        self.on_event(kind, raw)
-                        self.marker, self.high = None, None
-                elif value == STC_VIBRATION_COMMAND:
-                    self.on_event("vibration", value)
+                self._handle_byte(value)
+
+    def _handle_byte(self, value: int) -> None:
+        if self.marker is None and value in (STC_LIGHT_MARKER, STC_TEMPERATURE_MARKER):
+            self.marker, self.high = value, None
+        elif self.marker is not None:
+            if self.high is None:
+                self.high = value
+            else:
+                raw = (self.high << 8) | value
+                kind = "light" if self.marker == STC_LIGHT_MARKER else "temperature"
+                self.on_event(kind, raw)
+                self.marker, self.high = None, None
+        elif value in STC_CONTROL_COMMANDS:
+            self.on_event("command", value)
 
     def close(self):
         self.stop.set()
@@ -115,37 +140,55 @@ class STCSerialBridge:
 
 
 ZUBAT_PLAYER_MOVES = (
-    MoveSpec("日光束", "特殊", "威力：70", damage=20, effect="solar"),
-    MoveSpec("光合作用", "变化", "回复量：30%", heal_percent=30, effect="synthesis"),
+    MoveSpec(
+        "日光束", "特殊", "威力：70", damage=17, damage_max=21,
+        effect="solar", light_min=70, light_max=120,
+    ),
+    MoveSpec(
+        "光合作用", "变化", "回复量：30%", heal_percent=30,
+        effect="synthesis", light_min=30, light_max=50,
+    ),
 )
 
 ZUBAT_FOE_MOVES = (
-    MoveSpec("翅膀攻击", "物理", "", damage=18, effect="attack"),
-    MoveSpec("画龙点睛", "物理", "", damage=28, effect="tackle"),
-    MoveSpec("杂技", "物理", "", damage=26, effect="tackle"),
+    MoveSpec("翅膀攻击", "物理", "", damage=16, damage_max=19, effect="attack"),
+    MoveSpec("画龙点睛", "物理", "", damage=30, damage_max=36, effect="tackle"),
+    MoveSpec("杂技", "物理", "", damage=27, damage_max=33, effect="tackle"),
 )
 
 
 ARON_PLAYER_MOVES = (
-    MoveSpec("日光束", "特殊", "威力：70", damage=40, effect="solar"),
-    MoveSpec("光合作用", "变化", "回复量：30%", heal_percent=30, effect="synthesis"),
+    MoveSpec(
+        "日光束", "特殊", "威力：70", damage=33, damage_max=40,
+        effect="solar", light_min=70, light_max=120,
+    ),
+    MoveSpec(
+        "光合作用", "变化", "回复量：30%", heal_percent=30,
+        effect="synthesis", light_min=30, light_max=50,
+    ),
 )
 
 ARON_FOE_MOVES = (
-    MoveSpec("岩崩", "物理", "", damage=30, effect="rock"),
-    MoveSpec("彗星拳", "物理", "", damage=35, effect="heavy"),
-    MoveSpec("尖石攻击", "物理", "", damage=39, effect="rock"),
+    MoveSpec("岩崩", "物理", "", damage=33, damage_max=39, effect="rock"),
+    MoveSpec("彗星拳", "物理", "", damage=39, damage_max=46, effect="heavy"),
+    MoveSpec("尖石攻击", "物理", "", damage=42, damage_max=51, effect="rock"),
 )
 
 SABLEYE_PLAYER_MOVES = (
-    MoveSpec("日光束", "特殊", "威力：40", damage=21, effect="solar"),
-    MoveSpec("光合作用", "变化", "回复量：20%", heal_percent=20, effect="synthesis"),
+    MoveSpec(
+        "日光束", "特殊", "威力：40", damage=16, damage_max=19,
+        effect="solar", light_min=40, light_max=80,
+    ),
+    MoveSpec(
+        "光合作用", "变化", "回复量：20%", heal_percent=20,
+        effect="synthesis", light_min=20, light_max=40,
+    ),
 )
 
 SABLEYE_FOE_MOVES = (
-    MoveSpec("暗袭要害", "物理", "", damage=43, effect="attack"),
-    MoveSpec("移花接木", "物理", "", damage=58, effect="heavy"),
-    MoveSpec("暗影爪", "物理", "", damage=70, effect="tackle"),
+    MoveSpec("暗袭要害", "物理", "", damage=43, damage_max=52, effect="attack"),
+    MoveSpec("移花接木", "物理", "", damage=49, damage_max=58, effect="heavy"),
+    MoveSpec("暗影爪", "物理", "", damage=43, damage_max=52, effect="tackle"),
 )
 
 
@@ -154,18 +197,41 @@ def clamp_light(raw: int | None) -> int:
     return max(0, min(105, 0 if raw is None else int(raw)))
 
 
-def light_solar_power(raw: int | None) -> int:
-    """Map darkness 0 to power 70 and 105+ to power 120."""
-    return 70 + round(clamp_light(raw) * 50 / 105)
+def light_value(raw: int | None, minimum: int, maximum: int) -> int:
+    """Map the board's 0..105 light range onto inclusive gameplay values."""
+    return minimum + round(clamp_light(raw) * (maximum - minimum) / 105)
 
 
-def light_synthesis_percent(raw: int | None) -> int:
-    """Map darkness 0 to 30% healing and 105+ to 50%."""
-    return 30 + round(clamp_light(raw) * 20 / 105)
+def light_solar_power(raw: int | None, minimum: int = 70, maximum: int = 120) -> int:
+    return light_value(raw, minimum, maximum)
+
+
+def light_synthesis_percent(raw: int | None, minimum: int = 30, maximum: int = 50) -> int:
+    return light_value(raw, minimum, maximum)
+
+
+def light_adjusted_move(move: MoveSpec, raw: int | None) -> MoveSpec:
+    """Apply this encounter's light limits without changing its base damage roll."""
+    if move.effect == "solar":
+        minimum = 70 if move.light_min is None else move.light_min
+        maximum = 120 if move.light_max is None else move.light_max
+        power = light_solar_power(raw, minimum, maximum)
+        return replace(
+            move,
+            value_label=f"威力：{power}",
+            damage_scale=power / minimum,
+        )
+    if move.effect == "synthesis":
+        minimum = 30 if move.light_min is None else move.light_min
+        maximum = 50 if move.light_max is None else move.light_max
+        percent = light_synthesis_percent(raw, minimum, maximum)
+        return replace(move, value_label=f"回复量：{percent}%", heal_percent=percent)
+    return move
 
 ENCOUNTERS = {
     "zubat": EncounterSpec(
         "zubat", 1, "超音蝠", 90, "rocky", ZUBAT_PLAYER_MOVES, ZUBAT_FOE_MOVES,
+        foe_moves_first=True,
     ),
     "aron": EncounterSpec(
         "aron",
@@ -175,6 +241,7 @@ ENCOUNTERS = {
         "rocky_eve",
         ARON_PLAYER_MOVES,
         ARON_FOE_MOVES,
+        foe_moves_first=True,
     ),
     "sableye": EncounterSpec(
         "sableye",
@@ -188,7 +255,8 @@ ENCOUNTERS = {
                 "重磅冲撞",
                 "物理",
                 "",
-                damage=75,
+                damage=69,
+                damage_max=82,
                 effect="heavy",
                 info_lines=("双方体重相差越大", "威力越高"),
                 trigger="vibration",
@@ -205,7 +273,11 @@ ENCOUNTERS = {
 class EncounterBattleRules:
     """Small battle rules layer that can be tested without Pygame."""
 
-    def __init__(self, encounter: EncounterSpec | str = "zubat") -> None:
+    def __init__(
+        self,
+        encounter: EncounterSpec | str = "zubat",
+        rng: random.Random | None = None,
+    ) -> None:
         if isinstance(encounter, str):
             encounter = ENCOUNTERS[encounter]
         self.encounter = encounter
@@ -213,6 +285,13 @@ class EncounterBattleRules:
         self.foe_max_hp = encounter.enemy_max_hp
         self.player_hp = self.player_max_hp
         self.foe_hp = self.foe_max_hp
+        self.rng = rng or random.Random()
+
+    def roll_damage(self, move: MoveSpec) -> int:
+        """Roll uniformly within the authored range, then apply sensor scaling."""
+        maximum = move.damage if move.damage_max is None else move.damage_max
+        base_damage = self.rng.randint(move.damage, maximum)
+        return max(1, round(base_damage * move.damage_scale)) if base_damage else 0
 
     def use_player_move(self, move: MoveSpec) -> int:
         if move.heal_percent:
@@ -221,12 +300,12 @@ class EncounterBattleRules:
             self.player_hp = min(self.player_max_hp, self.player_hp + amount)
             return self.player_hp - before
         before = self.foe_hp
-        self.foe_hp = max(0, self.foe_hp - move.damage)
+        self.foe_hp = max(0, self.foe_hp - self.roll_damage(move))
         return before - self.foe_hp
 
     def use_foe_move(self, move: MoveSpec) -> int:
         before = self.player_hp
-        self.player_hp = max(0, self.player_hp - move.damage)
+        self.player_hp = max(0, self.player_hp - self.roll_damage(move))
         return before - self.player_hp
 
 
@@ -293,19 +372,11 @@ class BattleEncounterDemo:
                 self.light_raw = value
             elif kind == "temperature":
                 self.temperature_raw = value
-            elif kind == "vibration":
+            elif kind == "command":
                 self.handle_serial_command(value)
 
     def _current_player_moves(self) -> tuple[MoveSpec, ...]:
-        moves = list(self.encounter.player_moves)
-        for index, move in enumerate(moves):
-            if move.effect == "solar":
-                power = light_solar_power(self.light_raw)
-                moves[index] = replace(move, value_label=f"威力：{power}", damage=max(1, round(move.damage * power / 70)))
-            elif move.effect == "synthesis":
-                percent = light_synthesis_percent(self.light_raw)
-                moves[index] = replace(move, value_label=f"回复量：{percent}%", heal_percent=percent)
-        return tuple(moves)
+        return tuple(light_adjusted_move(move, self.light_raw) for move in self.encounter.player_moves)
 
     def _font(self, size: int):
         candidates = (
@@ -417,9 +488,10 @@ class BattleEncounterDemo:
             self.pg.mixer.stop()
         self.rng = random.Random(self.seed)
         self.pg.display.set_caption(
-            f"坚果哑铃 VS {self.encounter.enemy_name} - 战斗测试 [{self.encounter.number}/3]"
+            f"坚果矿洞大冒险：七日与千年的心愿 - "
+            f"坚果哑铃 VS {self.encounter.enemy_name} [{self.encounter.number}/3]"
         )
-        self.rules = EncounterBattleRules(self.encounter)
+        self.rules = EncounterBattleRules(self.encounter, self.rng)
         self.display_player_hp = float(self.rules.player_hp)
         self.display_foe_hp = float(self.rules.foe_hp)
         self.hp_tween = None
@@ -436,7 +508,7 @@ class BattleEncounterDemo:
         )
         self.opening_index = 0
         self._set_phase(self.PHASE_INTRO, self.opening_messages[0])
-        self._start_music("bgm/battle_wild.ogg")
+        self._start_music("bgm/1-09. Battle! (Wild Pokémon).flac")
         self._play_sound(f"{self.encounter.key}_cry")
 
     def switch_encounter(self, encounter_key: str) -> None:
@@ -449,6 +521,8 @@ class BattleEncounterDemo:
         self.opening_index += 1
         if self.opening_index < len(self.opening_messages):
             self._set_phase(self.PHASE_INTRO, self.opening_messages[self.opening_index])
+        elif self.encounter.foe_moves_first:
+            self._choose_foe_move()
         else:
             self._set_phase(self.PHASE_MENU)
 
@@ -497,10 +571,21 @@ class BattleEncounterDemo:
         return True
 
     def handle_serial_command(self, command: int) -> bool:
-        """Minimal serial hook ready for the main game's STC-B bridge."""
+        """Map STC-B controls onto the same paths used by the keyboard."""
         if command == STC_VIBRATION_COMMAND:
             return self.handle_vibration()
-        return False
+        key = {
+            STC_UP_COMMAND: self.pg.K_UP,
+            STC_DOWN_COMMAND: self.pg.K_DOWN,
+            STC_LEFT_COMMAND: self.pg.K_LEFT,
+            STC_RIGHT_COMMAND: self.pg.K_RIGHT,
+            STC_CONFIRM_COMMAND: self.pg.K_RETURN,
+            STC_RESET_COMMAND: self.pg.K_r,
+        }.get(command)
+        if key is None:
+            return False
+        self.handle_key(key)
+        return True
 
     def _move_cursor(self, key: int) -> None:
         pg = self.pg
@@ -827,7 +912,11 @@ class BattleEncounterDemo:
             info_lines = move.info_lines or (f"属性/{move.category}", move.value_label)
         self.canvas.blit(self.small_font.render(info_lines[0], False, INFO_COLOR), (338, 236))
         self.canvas.blit(self.small_font.render(info_lines[1], False, INFO_COLOR), (338, 272))
-        sensor_text = f"光照原始值：{self.light_raw}  日光束：{light_solar_power(self.light_raw)}  光合作用：{light_synthesis_percent(self.light_raw)}%"
+        solar = next(move for move in player_moves if move.effect == "solar")
+        synthesis = next(move for move in player_moves if move.effect == "synthesis")
+        sensor_text = (
+            f"光照原始值：{self.light_raw}  {solar.value_label}  {synthesis.value_label}"
+        )
         self.canvas.blit(self.small_font.render(sensor_text, False, INFO_COLOR), (18, 206))
 
     def _draw_message_panel(self) -> None:
@@ -874,7 +963,9 @@ class BattleEncounterDemo:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="坚果哑铃的三场独立战斗测试")
+    parser = argparse.ArgumentParser(
+        description="《坚果矿洞大冒险：七日与千年的心愿》战斗测试"
+    )
     parser.add_argument(
         "--encounter",
         choices=tuple(ENCOUNTERS),

@@ -1,4 +1,4 @@
-"""Default launcher for the STC-B Pokemon-style adventure."""
+"""Launcher for 坚果矿洞大冒险：七日与千年的心愿."""
 from __future__ import annotations
 
 import sys

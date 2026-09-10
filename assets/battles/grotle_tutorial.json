@@ -3,7 +3,7 @@
   "kind": "scripted_tutorial",
   "player": {
     "name": "坚果哑铃",
-    "max_hp": 100
+    "max_hp": 149
   },
   "opponent": {
     "name": "树林龟",
@@ -15,21 +15,24 @@
       "name": "日光束",
       "effect": "solar",
       "damage_min": 34,
-      "damage_max": 55,
+      "damage_max": 40,
+      "power_min": 70,
+      "power_max": 120,
       "info": ["属性/特殊", "光照决定威力"]
     },
     "synthesis": {
       "name": "光合作用",
       "effect": "synthesis",
-      "heal_min": 40,
-      "heal_max": 60,
+      "heal_percent_min": 30,
+      "heal_percent_max": 50,
       "info": ["属性/变化", "光照决定回复量"]
     }
   },
   "opponent_move": {
     "name": "日光束",
     "effect": "solar",
-    "damage": 33
+    "damage_min": 43,
+    "damage_max": 45
   },
   "messages": {
     "intro_absorb": "树林龟：进化后你吸收光照的能力应该变强了。",

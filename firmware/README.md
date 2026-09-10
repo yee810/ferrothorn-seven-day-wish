@@ -1,4 +1,4 @@
-# STC-B 固件
+# 《坚果矿洞大冒险：七日与千年的心愿》STC-B 固件
 
 `stc_bsp_gomoku` 是本项目使用的 STC-B 学习板固件。它使用 Keil C51 和课程提供的 STC-B BSP 库编译，开发板通过 USB 转串口与电脑上的 Pygame 游戏通信。
 
@@ -37,7 +37,7 @@
 | `0x40 hi lo` | 光照 ADC 值 |
 | `0x41 hi lo` | 温度 ADC 值 |
 
-战斗测试页使用同一协议：光照 `0x40 hi lo` 会实时更新日光束和光合作用的显示数值；震动 `0x09` 等同电脑键盘 `Z`，用于触发选中的重磅冲撞。电脑端启动命令为 `python battle_demo.py --port COM3` 或 `run_battles.bat COM3`。
+战斗测试页使用同一协议：光照 `0x40 hi lo` 会实时更新日光束和光合作用的显示数值；震动 `0x09` 等同电脑键盘 `Z`，用于触发选中的重磅冲撞。电脑端启动命令为 `python battle_demo.py --port COM3` 或 `scripts\run_battles.bat COM3`。
 
 电脑端发送给开发板：
 

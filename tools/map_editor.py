@@ -37,7 +37,11 @@ TILESET_CANDIDATES = (
 # 想再增加自己的图块集，只需往这里加一项。
 TILE_SOURCES = (
     {"name": "Outside", "kind": "sheet", "paths": TILESET_CANDIDATES},
-    {"name": "Cave", "kind": "dir", "path": ASSETS / "cave"},
+    {
+        "name": "Cave",
+        "kind": "sheet",
+        "paths": (ASSETS / "resource" / "map" / "tilesets" / "granite_tiles_32.png",),
+    },
 )
 
 OUT = ASSETS / "maps"
@@ -218,7 +222,10 @@ def main(name: str):
     MAP_W, MAP_H = resolve_size(name, old)
     tiles = load_tiles(TILE_SOURCES[0])
     if not tiles:
-        raise FileNotFoundError("找不到图块：请确认 assets/Outside.png 或 assets/cave 内存在 32×32 PNG")
+        raise FileNotFoundError(
+            "找不到图块：请确认 assets/Outside.png 或 "
+            "assets/resource/map/tilesets/granite_tiles_32.png 存在"
+        )
     source_index = 0
     layers = [load_layer(OUT / f"{name}_{s}.png", MAP_W, MAP_H) for s in ("lower", "current", "upper")]
     blocked = {(x, y) for x, y in ({tuple(c) for c in old.get("blocked", [])}) if x < MAP_W and y < MAP_H}

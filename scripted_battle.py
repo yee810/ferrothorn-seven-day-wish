@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
+
+from battle_demo import light_solar_power, light_synthesis_percent
 
 
 ROOT = Path(__file__).resolve().parent
@@ -32,8 +35,13 @@ class GrotleTutorial:
 
     MOVE_STAGES = frozenset({"require_solar", "require_synthesis", "free_battle"})
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(
+        self,
+        config: dict | None = None,
+        rng: random.Random | None = None,
+    ) -> None:
         self.config = config or load_scripted_battle()
+        self.rng = rng or random.Random()
         self.player_max_hp = int(self.config["player"]["max_hp"])
         self.foe_max_hp = int(self.config["opponent"]["max_hp"])
         self.reset()
@@ -81,19 +89,22 @@ class GrotleTutorial:
     def move_spec(self, move_id: str) -> dict:
         return self.config["moves"][move_id]
 
-    @staticmethod
-    def _sensor_value(light: int | None, low: int, high: int) -> int:
-        value = 512 if light is None else max(0, min(1023, int(light)))
-        return low + round((high - low) * value / 1023)
-
     def light_values(self, light: int | None) -> tuple[int, int]:
-        """Return the current solar-beam damage and synthesis HP recovery."""
+        """Return solar power and synthesis percentage, matching later battles."""
         solar = self.move_spec("solar_beam")
         synthesis = self.move_spec("synthesis")
         return (
-            self._sensor_value(light, int(solar["damage_min"]), int(solar["damage_max"])),
-            self._sensor_value(light, int(synthesis["heal_min"]), int(synthesis["heal_max"])),
+            light_solar_power(light, int(solar["power_min"]), int(solar["power_max"])),
+            light_synthesis_percent(
+                light,
+                int(synthesis["heal_percent_min"]),
+                int(synthesis["heal_percent_max"]),
+            ),
         )
+
+    def _roll_damage(self, spec: dict, scale: float = 1.0) -> int:
+        base = self.rng.randint(int(spec["damage_min"]), int(spec["damage_max"]))
+        return max(1, round(base * scale))
 
     def confirm(self) -> BattleAction | None:
         self.hint = None
@@ -129,8 +140,11 @@ class GrotleTutorial:
         self.hint = None
         spec = self.move_spec(move_id)
         if move_id == "solar_beam":
-            amount = self._sensor_value(light, int(spec["damage_min"]), int(spec["damage_max"]))
-            self.foe_hp = max(0, self.foe_hp - amount)
+            power, _heal_percent = self.light_values(light)
+            rolled_damage = self._roll_damage(spec, power / int(spec["power_min"]))
+            before = self.foe_hp
+            self.foe_hp = max(0, self.foe_hp - rolled_damage)
+            amount = before - self.foe_hp
             if self.foe_hp == 0:
                 after = "won"
             elif self.stage == "require_solar":
@@ -140,7 +154,8 @@ class GrotleTutorial:
             kind = "damage"
             target = "foe"
         else:
-            amount = self._sensor_value(light, int(spec["heal_min"]), int(spec["heal_max"]))
+            _power, heal_percent = self.light_values(light)
+            amount = round(self.player_max_hp * heal_percent / 100)
             before = self.player_hp
             self.player_hp = min(self.player_max_hp, self.player_hp + amount)
             amount = self.player_hp - before
@@ -162,7 +177,7 @@ class GrotleTutorial:
 
     def _opponent_solar(self, after: str) -> BattleAction:
         spec = self.config["opponent_move"]
-        amount = min(self.player_hp, int(spec["damage"]))
+        amount = min(self.player_hp, self._roll_damage(spec))
         self.player_hp -= amount
         self.after_action = "lost" if self.player_hp == 0 else after
         self.stage = "action"
