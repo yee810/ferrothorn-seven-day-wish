@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.log
 .venv/
+.test-deps/
+.pytest_cache/
 venv/
 env/
 .idea/
@@ -14,6 +16,8 @@ env/
 /cave_preview.png
 /preview_*.png
 /tmp_*.png
+/assets/resource/battle/previews/
+/_待删除_可手动删除/
 
 # Local/editor OS files.
 Thumbs.db

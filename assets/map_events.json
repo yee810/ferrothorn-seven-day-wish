@@ -1125,7 +1125,7 @@
           "type": "dialogue",
           "preload": "sableye_right.png",
           "speaker": "勾魂眼",
-          "text": "少废话，接招吧！"
+          "text": "来吧小子，老夫允许你先攻过来。"
         },
         {
           "type": "battle",
@@ -1367,6 +1367,10 @@
         ]
       },
       "steps": [
+        {
+          "type": "play_music",
+          "track": "70. Don't Ever Forget....flac"
+        },
         {
           "type": "dialogue",
           "preload": "no_portrait_bottom.png",
@@ -1629,6 +1633,10 @@
           "preload": "ferrothorn_left.png",
           "speaker": "坚果哑铃",
           "text": "那么，可以成为我们的朋友了吗，基拉祈？"
+        },
+        {
+          "type": "play_music",
+          "track": "62. Through the Sea of Time.flac"
         },
         {
           "type": "dialogue",

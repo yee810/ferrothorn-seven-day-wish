@@ -15,7 +15,8 @@ import random
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 import pygame
@@ -23,8 +24,9 @@ import pygame
 from battle_demo import (
     ENCOUNTERS,
     EncounterBattleRules,
-    light_solar_power,
-    light_synthesis_percent,
+    draw_status_effect,
+    draw_strategy_panel,
+    light_adjusted_move,
 )
 from event_system import (
     ICON_DIR,
@@ -44,6 +46,11 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
+BGM_DIR = ASSETS / "resource" / "audio" / "bgm"
+TITLE_BGM = ASSETS / "Title.ogg"
+CAVE_BGM = BGM_DIR / "1-25. Petalburg Woods ~ Granite Cave ~ Jagged Pass ~ Fiery Path.flac"
+BATTLE_BGM = BGM_DIR / "1-09. Battle! (Wild Pokémon).flac"
+CAVE_MAPS = frozenset({"grancave", "caveB1F", "caveB2f", "finalcave"})
 WIDTH, HEIGHT = 480, 320
 PLAY_W, PLAY_H = WIDTH, HEIGHT
 WINDOW_SCALE = 2
@@ -56,6 +63,32 @@ ROCK_FRAME_HOLD = 1
 WARP_FADE_FRAMES = 12
 DIALOGUE_CHAR_FRAMES = 2
 LAYER_NAMES = ("lower", "current", "upper")
+# Failsafe ceiling for transient, input-blocking actions (atomic step, heavy
+# slam animation, warp fade, scripted event action).  If one of those flags is
+# ever left set, every key press is swallowed by command()/handle_events() and
+# the game looks frozen; this watchdog clears it and reports which one stuck.
+MAX_BUSY_FRAMES = FPS * 12
+# A frame slower than this is logged together with the stage that blocked, so a
+# frozen window can be traced to events/serial/update/draw instead of guessed.
+SLOW_FRAME_SECONDS = 0.5
+# If the main loop stops advancing for this long, dump the blocking stack to the
+# console and to STALL_LOG, so an unresponsive window reports where it waits.
+STALL_WATCHDOG_SECONDS = 2.0
+STALL_LOG = ROOT / "game_stall.log"
+# pygame-ce exposes window events as individual types (no WINDOWEVENT wrapper),
+# so build the label table from whatever this build provides.
+WINDOW_EVENT_LABELS = {
+    getattr(pygame, name): label
+    for name, label in (
+        ("WINDOWFOCUSLOST", "focus lost"),
+        ("WINDOWFOCUSGAINED", "focus gained"),
+        ("WINDOWMINIMIZED", "minimized"),
+        ("WINDOWRESTORED", "restored"),
+        ("WINDOWHIDDEN", "hidden"),
+        ("WINDOWSHOWN", "shown"),
+    )
+    if hasattr(pygame, name)
+}
 
 WARP_LINKS = (
     ("world", (41, 10), "grancave", (25, 10)),
@@ -193,8 +226,12 @@ class Game:
         except pygame.error:
             pass
         self.display = pygame.display.set_mode(WINDOW_SIZE)
+        # Alphabet controls (Z/R) must not activate the Windows IME candidate UI.
+        # Text input remains enabled in the separate editors, which need typing.
+        pygame.key.stop_text_input()
         self.screen = pygame.Surface((WIDTH, HEIGHT)).convert()
-        pygame.display.set_caption("STC-B 坚果哑铃：流星与基拉祈")
+        self._scaled_surface = pygame.Surface(WINDOW_SIZE).convert()
+        pygame.display.set_caption("坚果矿洞大冒险：七日与千年的心愿")
         self.clock = pygame.time.Clock()
         self.font = self._font(13)
         self.small = self._font(10)
@@ -243,8 +280,11 @@ class Game:
         self.step = None
         self.field_attack = None
         self.warp_fade_frames = 0
+        self._busy_frames = 0
+        self._frame_timings: dict[str, float] = {}
         self.fade_overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         self.facing = "down"
+        self.current_bgm: Path | None = None
         self._load_assets()
         self.story_events = self._load_story_events()
         self.step_events = self._load_step_events()
@@ -274,7 +314,11 @@ class Game:
         if world:
             self.map_view = "world"
             self.map_view_pos[:] = world.start
+        self._heartbeat = 0
+        self._main_thread_id = threading.get_ident()
+        self.sync_map_bgm(force=True)
         self.trigger_game_start_event()
+        self.focus_window()
 
     @staticmethod
     def _font(size, bold=False):
@@ -420,15 +464,6 @@ class Game:
             "坚果哑铃": self._portrait(self.player_portrait, (150, 150)),
             "基拉祈": self._portrait(self.jirachi, (150, 150)),
         }
-        music = ASSETS / "Title.ogg"
-        if music.exists():
-            try:
-                pygame.mixer.music.load(str(music))
-                pygame.mixer.music.set_volume(0.24)
-                pygame.mixer.music.play(-1)
-            except pygame.error:
-                pass
-
     def _load_tile_map(self, name, spec, size=None, start=None, blocked=None):
         width, height = size or spec.get("size", (24, 18))
         width, height = max(1, int(width)), max(1, int(height))
@@ -683,6 +718,32 @@ class Game:
         except pygame.error:
             return None
 
+    def play_bgm(self, track, *, force=False):
+        """Play one looping BGM track without restarting an unchanged track."""
+        path = Path(track)
+        if not path.is_absolute():
+            path = BGM_DIR / path.name
+        if not force and self.current_bgm == path:
+            return True
+        if not path.is_file() or not pygame.mixer.get_init():
+            return False
+        try:
+            pygame.mixer.music.load(str(path))
+            pygame.mixer.music.set_volume(0.24)
+            pygame.mixer.music.play(-1)
+        except pygame.error:
+            return False
+        self.current_bgm = path
+        return True
+
+    def map_bgm(self):
+        map_name = self.map_view or self.scene
+        return CAVE_BGM if map_name in CAVE_MAPS else TITLE_BGM
+
+    def sync_map_bgm(self, *, force=False):
+        if self.scene != "battle":
+            self.play_bgm(self.map_bgm(), force=force)
+
     @staticmethod
     def _load_story_events():
         """Load editable event dialogue, retaining a built-in fallback."""
@@ -749,10 +810,17 @@ class Game:
         return events
 
     def run(self):
+        self._main_thread_id = threading.get_ident()
+        self._heartbeat = 0
+        self.start_stall_watchdog()
         while self.running:
+            self._heartbeat += 1
             self.clock.tick(FPS)
+            stamp = time.perf_counter()
             self.handle_events()
+            stamp = self._lap("events", stamp)
             self.read_serial()
+            stamp = self._lap("serial", stamp)
             self.update_movement()
             self.update_field_attack()
             self.update_warp_fade()
@@ -760,14 +828,121 @@ class Game:
             self.update_battle_effect()
             self.update_battle_message_reveal()
             self.update_dialogue_reveal()
+            self.guard_busy_state()
+            stamp = self._lap("update", stamp)
             self.draw()
+            stamp = self._lap("draw", stamp)
+            self.report_slow_frame()
         self.serial.close()
         pygame.quit()
+
+    def start_stall_watchdog(self):
+        """Dump the main thread stack whenever the loop stops advancing.
+
+        A frozen game window that recovers when it is re-activated is not a
+        Python deadlock, so this reports the exact blocking call instead of
+        guessing.  The dump goes to the console and to ``game_stall.log``.
+        """
+        def watch():
+            last = self._heartbeat
+            while self.running:
+                time.sleep(STALL_WATCHDOG_SECONDS)
+                beat = self._heartbeat
+                if beat != last:
+                    last = beat
+                    continue
+                frame = sys._current_frames().get(self._main_thread_id)
+                if frame is None:
+                    continue
+                stack = "".join(traceback.format_stack(frame))
+                text = (f"[stall] main loop frozen for >{STALL_WATCHDOG_SECONDS:.0f}s\n"
+                        f"{stack}")
+                print(text, flush=True)
+                try:
+                    with open(STALL_LOG, "a", encoding="utf-8") as handle:
+                        handle.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n{text}\n")
+                except OSError:
+                    pass
+                last = beat
+
+        threading.Thread(target=watch, daemon=True).start()
+
+    def focus_window(self):
+        """Bring the game window to the foreground so keys reach it at startup."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            handle = pygame.display.get_wm_info().get("window")
+            if handle:
+                user32 = ctypes.windll.user32
+                user32.ShowWindow(handle, 5)  # SW_SHOW
+                user32.BringWindowToTop(handle)
+                user32.SetForegroundWindow(handle)
+        except Exception:
+            pass
+
+    def _lap(self, name, start):
+        """Record how long one pipeline stage took during this frame."""
+        now = time.perf_counter()
+        self._frame_timings[name] = now - start
+        return now
+
+    def report_slow_frame(self):
+        """Print which stage stalled; a frozen window logs the blocking call."""
+        total = sum(self._frame_timings.values())
+        if total < SLOW_FRAME_SECONDS:
+            return
+        parts = ", ".join(
+            f"{name}={value * 1000:.0f}ms"
+            for name, value in self._frame_timings.items()
+        )
+        print(f"[perf] slow frame {total * 1000:.0f}ms ({parts})", flush=True)
+        self._frame_timings.clear()
+
+    def busy_action(self):
+        """True while a transient action legitimately blocks player input."""
+        return bool(self.step or self.field_attack or self.warp_fade_frames
+                    or self.event_action)
+
+    def guard_busy_state(self):
+        """Failsafe against a stuck action flag locking every input forever."""
+        if not self.busy_action() and not self.battle_effect:
+            self._busy_frames = 0
+            return
+        self._busy_frames += 1
+        if self._busy_frames < MAX_BUSY_FRAMES:
+            return
+        stuck = [
+            name for name, value in (
+                ("step", self.step),
+                ("field_attack", self.field_attack),
+                ("warp_fade_frames", self.warp_fade_frames),
+                ("event_action", self.event_action),
+                ("battle_effect", self.battle_effect),
+            ) if value
+        ]
+        self.step = None
+        self.field_attack = None
+        self.event_action = None
+        self.warp_fade_frames = 0
+        self.event_camera_focus = None
+        self.battle_effect = None
+        self._busy_frames = 0
+        print(f"[guard] cleared stuck action state: {', '.join(stuck) or 'unknown'}", flush=True)
+        self.show_toast("动作超时，已恢复操作。", 2.0)
 
     def handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif event.type in WINDOW_EVENT_LABELS:
+                if event.type == pygame.WINDOWFOCUSGAINED:
+                    pygame.key.stop_text_input()
+                # Log focus/minimise changes: they are the prime suspect when
+                # the window stops reacting and a click brought it back.
+                print(f"[window] {WINDOW_EVENT_LABELS[event.type]}", flush=True)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
@@ -917,6 +1092,7 @@ class Game:
         self.warp_fade_frames = 0
         self.facing = "down"
         self.dialogue = []
+        self.sync_map_bgm()
         self.show_toast(f"地图 {index + 1}：{self.MAP_VIEW_TITLES[map_name]}", 1.8)
 
     def move_map_view(self, command):
@@ -968,7 +1144,9 @@ class Game:
         if "heavy_slam_learned" not in self.story_flags:
             self.show_toast("还没有学会场外招式“重磅冲撞”。", 1.8)
             return False
-        tile_map = self.tile_maps[self.map_view]
+        tile_map = self.tile_maps.get(self.map_view)
+        if tile_map is None:
+            return False
         dx, dy = {
             "up": (0, -1), "down": (0, 1),
             "left": (-1, 0), "right": (1, 0),
@@ -1024,12 +1202,16 @@ class Game:
         self.warp_fade_frames = WARP_FADE_FRAMES
         if hasattr(self, "_map_camera"):
             del self._map_camera
+        self.sync_map_bgm()
         self.trigger_event_at("warp_arrival")
         return True
 
     def update_warp_fade(self):
-        if self.warp_fade_frames:
+        if self.warp_fade_frames > 0:
             self.warp_fade_frames -= 1
+        elif self.warp_fade_frames < 0:
+            # A negative value is always truthy, so it would block input forever.
+            self.warp_fade_frames = 0
 
     def _movement_context(self):
         return ("view", self.map_view) if self.map_view else ("scene", self.scene)
@@ -1171,6 +1353,10 @@ class Game:
                         self.story_flags.add(flag)
                     else:
                         self.story_flags.discard(flag)
+                self.active_map_event_step += 1
+                continue
+            if step_type == "play_music":
+                self.play_bgm(step.get("track", ""))
                 self.active_map_event_step += 1
                 continue
             if step_type == "actor_visibility":
@@ -1349,6 +1535,7 @@ class Game:
             self.scene = next_scene
             if next_scene in self.SCENES:
                 self.pos[:] = self.scene_start(next_scene)
+            self.sync_map_bgm()
             if next_scene == "route":
                 self.meteor_phase = 1
                 self.show_toast("一道流星划过天空，坠向北方的山洞。", 3)
@@ -1399,6 +1586,7 @@ class Game:
         self.field_attack = None
         self.warp_fade_frames = 0
         self.scene = "battle"
+        self.play_bgm(BATTLE_BGM)
         self.player_hp, self.enemy_hp = 100, 100
         self.move_cursor = 0
         self.heavy_ready = False
@@ -1489,6 +1677,7 @@ class Game:
         self.warp_fade_frames = 0
         if hasattr(self, "_map_camera"):
             del self._map_camera
+        self.sync_map_bgm()
 
     def finish_event_battle(self):
         self.event_battle_active = False
@@ -1512,6 +1701,7 @@ class Game:
         self.facing = state["facing"]
         self.event_battle_return = None
         self.event_camera_focus = None
+        self.sync_map_bgm()
 
     def restart_map_event_after_defeat(self):
         self.restore_map_event_origin()
@@ -1528,6 +1718,10 @@ class Game:
 
     def battle_command(self, command):
         if self.battle_effect:
+            if command == 5:
+                frames = self.battle_effect_frames.get(self.battle_effect["name"], [])
+                self.battle_effect["frame"] = max(108, len(frames) * 7)
+                self.update_battle_effect()
             return
         if self.scripted_battle:
             self.scripted_battle_command(command)
@@ -1544,6 +1738,7 @@ class Game:
                     self.scene = "route"
                     self.pos[:] = self.scene_start("route")
                     self.meteor_phase = 1
+                    self.sync_map_bgm()
                     self.show_toast("训练结束。青梅：流星坠向北方的山洞！", 3)
             return
         if self.battle_lost:
@@ -1605,20 +1800,10 @@ class Game:
         encounter = self.encounter_battle
         if not encounter:
             return ()
-        moves = []
-        for move in encounter["spec"].player_moves:
-            if move.effect == "solar":
-                power = light_solar_power(self.light)
-                move = replace(
-                    move,
-                    value_label=f"威力：{power}",
-                    damage=max(1, round(move.damage * power / 70)),
-                )
-            elif move.effect == "synthesis":
-                percent = light_synthesis_percent(self.light)
-                move = replace(move, value_label=f"回复量：{percent}%", heal_percent=percent)
-            moves.append(move)
-        return tuple(moves)
+        return tuple(
+            light_adjusted_move(move, self.light)
+            for move in encounter["spec"].player_moves
+        )
 
     def encounter_battle_command(self, command):
         encounter = self.encounter_battle
@@ -1652,9 +1837,12 @@ class Game:
                 encounter["message"] = encounter["opening_messages"][index]
                 self.sync_encounter_message(force=True)
             else:
-                encounter["stage"] = "menu"
-                encounter["message"] = ""
-                self.battle_message = ""
+                if encounter["spec"].foe_moves_first:
+                    self.queue_encounter_foe_move()
+                else:
+                    encounter["stage"] = "menu"
+                    encounter["message"] = ""
+                    self.battle_message = ""
         elif stage == "player_announce":
             self.begin_encounter_player_action()
         elif stage == "foe_announce":
@@ -1662,6 +1850,14 @@ class Game:
         elif stage == "won":
             self.finish_event_battle()
         elif stage == "lost":
+            hint = encounter["rules"].defeat_hint()
+            if hint:
+                encounter["stage"] = "defeat_hint"
+                encounter["message"] = hint
+                self.sync_encounter_message(force=True)
+            else:
+                self.restart_map_event_after_defeat()
+        elif stage == "defeat_hint":
             self.restart_map_event_after_defeat()
 
     def select_encounter_move(self, move):
@@ -1678,6 +1874,8 @@ class Game:
         encounter = self.encounter_battle
         if not encounter or encounter["stage"] != "menu":
             return False
+        if encounter["spec"].hidden_move is not None:
+            return self.select_encounter_move(encounter["spec"].hidden_move)
         moves = self.encounter_player_moves()
         move = moves[self.move_cursor % len(moves)]
         if move.trigger != "vibration":
@@ -1693,14 +1891,14 @@ class Game:
         move = encounter["selected_move"]
         old_player, old_foe = rules.player_hp, rules.foe_hp
         rules.use_player_move(move)
-        target = "player" if move.heal_percent else "foe"
+        target = "player" if move.heal_percent or move.effect in ("growth", "protect") else "foe"
         transition = (
             ("player", old_player, rules.player_hp)
             if target == "player" else ("foe", old_foe, rules.foe_hp)
         )
         encounter["stage"] = "player_action"
         self.encounter_effect_actor = "player"
-        self.begin_battle_effect(move.effect, encounter["message"], target, transition)
+        self.begin_battle_effect(rules.last_effect, rules.last_message or encounter["message"], target, transition)
 
     def begin_encounter_foe_action(self):
         encounter = self.encounter_battle
@@ -1713,9 +1911,19 @@ class Game:
         encounter["stage"] = "foe_action"
         self.encounter_effect_actor = "foe"
         self.begin_battle_effect(
-            move.effect, encounter["message"], "player",
+            rules.last_effect, rules.last_message or encounter["message"], "player",
             ("player", old_hp, rules.player_hp),
         )
+
+    def queue_encounter_foe_move(self):
+        encounter = self.encounter_battle
+        if not encounter:
+            return
+        move = encounter["rules"].choose_foe_move()
+        encounter["foe_move"] = move
+        encounter["stage"] = "foe_announce"
+        encounter["message"] = f"{encounter['spec'].enemy_name}使出了{move.name}！"
+        self.sync_encounter_message(force=True)
 
     def finish_encounter_effect(self):
         encounter = self.encounter_battle
@@ -1732,10 +1940,7 @@ class Game:
                 encounter["message"] = f"{encounter['spec'].enemy_name}倒下了！"
                 self.battle_won = True
             else:
-                move = random.choice(encounter["spec"].foe_moves)
-                encounter["foe_move"] = move
-                encounter["stage"] = "foe_announce"
-                encounter["message"] = f"{encounter['spec'].enemy_name}使出了{move.name}！"
+                self.queue_encounter_foe_move()
         elif rules.player_hp <= 0:
             encounter["stage"] = "lost"
             encounter["message"] = "坚果哑铃倒下了！"
@@ -1843,7 +2048,7 @@ class Game:
         self.battle_effect["frame"] += 1
         frames = self.battle_effect_frames.get(self.battle_effect["name"], [])
         # The standalone battle UI holds each 192px effect frame for ~110ms.
-        duration = max(48, len(frames) * 7)
+        duration = max(108 if self.encounter_battle else 48, len(frames) * 7)
         transition = self.battle_effect.get("hp_transition")
         if transition:
             side, start, target = transition
@@ -1890,6 +2095,7 @@ class Game:
         self.scene = order[(order.index(self.scene) + 1) % len(order)]
         if self.scene in self.SCENES:
             self.pos[:] = self.scene_start(self.scene)
+        self.sync_map_bgm()
 
     def reset(self):
         self.map_view = None
@@ -1931,6 +2137,7 @@ class Game:
         if world:
             self.map_view = "world"
             self.map_view_pos[:] = world.start
+        self.sync_map_bgm(force=True)
         self.trigger_game_start_event()
 
     def show_toast(self, text, seconds=2):
@@ -1958,9 +2165,15 @@ class Game:
         elif self.toast and time.monotonic() < self.toast_until:
             self.draw_toast(self.toast)
         self.draw_warp_fade()
-        scaled = pygame.transform.scale(self.screen, WINDOW_SIZE)
-        self.display.blit(scaled, (0, 0))
-        pygame.display.flip()
+        # Reuse one scaled surface instead of allocating ~2.4 MB every frame.
+        pygame.transform.scale(self.screen, WINDOW_SIZE, self._scaled_surface)
+        self.display.blit(self._scaled_surface, (0, 0))
+        # Presenting while the window is hidden/minimised can block inside the
+        # Windows swap chain until the window is activated again (that matches
+        # "click outside and back, and it recovers").  Skip the swap then; the
+        # next frame after reactivation draws normally.
+        if pygame.display.get_active():
+            pygame.display.flip()
 
     def is_event_animation_active(self, name):
         action = self.event_action
@@ -2347,6 +2560,10 @@ class Game:
         effect = self.battle_effect
         if not effect:
             return
+        if effect["name"] in ("growth", "protect"):
+            draw_status_effect(pygame, self.screen, effect["name"], (126, 142),
+                               effect["frame"] * 1000 // FPS)
+            return
         frames = self.battle_effect_frames.get(effect["name"], [])
         if not frames:
             return
@@ -2459,12 +2676,11 @@ class Game:
             required = battle.move_spec(battle.required_move)["name"]
             info = ("当前教学目标", f"请使用{required}")
         else:
-            solar_damage, synthesis_heal = battle.light_values(self.light)
-            light = 512 if self.light is None else max(0, min(1023, int(self.light)))
+            solar_power, synthesis_percent = battle.light_values(self.light)
             if moves[self.move_cursor] == "solar_beam":
-                info = ["属性/特殊", f"当前威力：{solar_damage}  (ADC {light})"]
+                info = ["属性/特殊", f"威力：{solar_power}"]
             elif moves[self.move_cursor] == "synthesis":
-                info = ["属性/变化", f"当前回复：{synthesis_heal} HP  (ADC {light})"]
+                info = ["属性/变化", f"回复量：{synthesis_percent}%"]
             else:
                 info = list(selected.get("info", []))
         for index, line in enumerate(info[:2]):
@@ -2529,12 +2745,8 @@ class Game:
                 self.battle_small.render(str(line), False, (56, 56, 56)),
                 (338, 236 + index * 36),
             )
-        sensor = (
-            f"光照原始值：{0 if self.light is None else self.light}  "
-            f"日光束：{light_solar_power(self.light)}  "
-            f"光合作用：{light_synthesis_percent(self.light)}%"
-        )
-        self.screen.blit(self.battle_small.render(sensor, False, (56, 56, 56)), (18, 204))
+        draw_strategy_panel(pygame, self.screen, self.battle_small,
+                            self.encounter_battle["rules"])
 
     def blit_cover(self, image, target):
         """Scale a map or battle background without changing its aspect ratio."""

@@ -14,6 +14,7 @@ MAPS_PATH = ASSETS / "maps" / "outdoor_maps.json"
 WORLD_PATH = ASSETS / "maps" / "world_connections.json"
 PRELOAD_DIR = ASSETS / "resource" / "dialogue" / "preloads"
 ICON_DIR = ASSETS / "resource" / "event" / "icon"
+BGM_DIR = ASSETS / "resource" / "audio" / "bgm"
 
 EVENT_VERSION = 2
 TRIGGER_TYPES = frozenset({
@@ -28,6 +29,7 @@ STEP_TYPES = frozenset({
     "camera_pan",
     "camera_shake",
     "play_animation",
+    "play_music",
     "actor_move",
     "actor_visibility",
     "break_rock",
@@ -131,6 +133,11 @@ def normalize_step(raw: object) -> dict | None:
             "animation": _slug(str(raw.get("animation", "meteor"))),
             "position": _position(raw.get("position", [0, 0])),
             "duration_ms": _duration(raw.get("duration_ms"), 1000),
+        }
+    if step_type == "play_music":
+        return {
+            "type": "play_music",
+            "track": Path(str(raw.get("track", ""))).name,
         }
     if step_type == "actor_move":
         return {
